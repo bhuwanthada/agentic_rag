@@ -1,6 +1,9 @@
+import sqlite3
+
 from dotenv import load_dotenv
 from langgraph.graph import END, StateGraph
-
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 from graph.chains.answer_grader import answer_grader
 from graph.chains.hallucination_grader import hallucination_grader
 from graph.chains.router import RouteQuery, question_router
@@ -61,43 +64,50 @@ def route_question(state: GraphState) -> str:
         return RETRIEVE
 
 
-workflow = StateGraph(GraphState)
+def compile_workflow():
+    conn = sqlite3.connect("checkpoint.sqlite", check_same_thread=False)
+    memory = SqliteSaver(conn)
+    # memory = MemorySaver() # commented out as we are storing greaph state in sqlite.
 
-workflow.add_node(RETRIEVE, retrieve)
-workflow.add_node(GRADE_DOCUMENTS, grade_documents)
-workflow.add_node(GENERATE, generate)
-workflow.add_node(WEBSEARCH, web_search)
+    workflow = StateGraph(GraphState)
 
-workflow.set_conditional_entry_point(
-    route_question,
-    {
-        WEBSEARCH: WEBSEARCH,
-        RETRIEVE: RETRIEVE,
-    },
-)
-workflow.set_entry_point(RETRIEVE)
-workflow.add_edge(RETRIEVE, GRADE_DOCUMENTS)
-workflow.add_conditional_edges(
-    GRADE_DOCUMENTS,
-    decide_to_generate,
-    {
-        WEBSEARCH: WEBSEARCH,
-        GENERATE: GENERATE,
-    },
-)
+    workflow.add_node(RETRIEVE, retrieve)
+    workflow.add_node(GRADE_DOCUMENTS, grade_documents)
+    workflow.add_node(GENERATE, generate)
+    workflow.add_node(WEBSEARCH, web_search)
 
-workflow.add_conditional_edges(
-    GENERATE,
-    grade_generation_grounded_in_documents_and_question,
-    {
-        "not supported": GENERATE,
-        "useful": END,
-        "not useful": WEBSEARCH,
-    },
-)
-workflow.add_edge(WEBSEARCH, GENERATE)
-workflow.add_edge(GENERATE, END)
+    workflow.set_conditional_entry_point(
+        route_question,
+        {
+            WEBSEARCH: WEBSEARCH,
+            RETRIEVE: RETRIEVE,
+        },
+    )
+    workflow.set_entry_point(RETRIEVE)
+    workflow.add_edge(RETRIEVE, GRADE_DOCUMENTS)
+    workflow.add_conditional_edges(
+        GRADE_DOCUMENTS,
+        decide_to_generate,
+        {
+            WEBSEARCH: WEBSEARCH,
+            GENERATE: GENERATE,
+        },
+    )
 
-app = workflow.compile()
+    workflow.add_conditional_edges(
+        GENERATE,
+        grade_generation_grounded_in_documents_and_question,
+        {
+            "not supported": GENERATE,
+            "useful": END,
+            "not useful": WEBSEARCH,
+        },
+    )
+    workflow.add_edge(WEBSEARCH, GENERATE)
+    workflow.add_edge(GENERATE, END)
+    app = workflow.compile(checkpointer=memory)
+    app.get_graph().draw_mermaid_png(output_file_path="graph.png")
+    return app, memory
 
-app.get_graph().draw_mermaid_png(output_file_path="graph.png")
+
+
